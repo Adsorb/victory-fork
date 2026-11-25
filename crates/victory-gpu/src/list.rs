@@ -1668,6 +1668,16 @@ extern "system" fn draw(_: This) {
     count_draw();
 }
 
+// A title buffer can be a small slice of a much larger shadow mapping.
+fn indirect_address(base: u64, width: u64, offset: u64, bytes: u64) -> Option<u64> {
+    let end = offset.checked_add(bytes)?;
+    if end > width {
+        return None;
+    }
+    base.checked_add(end)?;
+    base.checked_add(offset)
+}
+
 /// `ExecuteIndirect(signature, max count, arguments, offset, count buffer,
 /// offset)`. The title's signatures (title+0x2479466, 2026-11-24)
 /// hold one argument each: draw (stride 16), indexed draw (20), dispatch
@@ -1690,8 +1700,11 @@ extern "system" fn execute_indirect(
     let Some((stride, args)) = crate::signature::layout(signature) else {
         return;
     };
-    let address = crate::resource::buffer_bytes(arguments).map(|(p, _)| p as u64 + offset);
-    let counter = crate::resource::buffer_bytes(count).map(|(p, _)| p as u64 + count_offset);
+    let bytes = u64::from(stride) * u64::from(max.max(1));
+    let address = crate::resource::buffer_bytes(arguments)
+        .and_then(|(p, width)| indirect_address(p as u64, width, offset, bytes));
+    let counter = crate::resource::buffer_bytes(count)
+        .and_then(|(p, width)| indirect_address(p as u64, width, count_offset, 4));
     let mut ran = false;
     #[cfg(windows)]
     if let ([[kind, ..]], Some(address)) = (args, address)
@@ -2171,6 +2184,16 @@ static NEWER_LIST_FUNCTIONS: Table<160> = Table(list_table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[test]
+    fn indirect_arguments_stay_inside_the_declared_buffer() {
+        assert_eq!(indirect_address(0x1000, 64, 52, 12), Some(0x1034));
+        assert_eq!(indirect_address(0x1000, 64, 56, 12), None);
+        assert_eq!(indirect_address(0x1000, 64, 60, 4), Some(0x103c));
+        assert_eq!(indirect_address(0x1000, 64, 61, 4), None);
+        assert_eq!(indirect_address(0x1000, u64::MAX, u64::MAX, 4), None);
+        assert_eq!(indirect_address(u64::MAX - 3, 16, 0, 4), None);
+    }
 
     #[test]
     fn every_inline_command_falls_back_to_the_table() {
